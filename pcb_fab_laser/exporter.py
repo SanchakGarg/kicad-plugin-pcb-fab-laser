@@ -41,14 +41,45 @@ def _simplify(poly):
         poly.Simplify()
 
 
+def _is_filled_shape(item):
+    if item.Type() != pcbnew.PCB_SHAPE_T:
+        return False
+    try:
+        return item.IsSolidFill()
+    except AttributeError:
+        return item.IsFilled()
+
+
+SIDE_LAYERS = {
+    "front": ("F_Cu", "F_SilkS", "F_Mask"),
+    "back": ("B_Cu", "B_SilkS", "B_Mask"),
+}
+
+
+def copper_item_count(board, layer):
+    """Tracks + SMD pads + zones on `layer`; used to guess which side is routed.
+    Through-hole pads sit on every copper layer, so they would make a
+    single-sided THT board look double-sided — skip them."""
+    n = sum(1 for t in board.GetTracks() if t.IsOnLayer(layer))
+    for fp in board.GetFootprints():
+        n += sum(1 for p in fp.Pads()
+                 if p.IsOnLayer(layer) and p.GetAttribute() != pcbnew.PAD_ATTRIB_PTH)
+    for i in range(board.GetAreaCount()):
+        if board.GetArea(i).IsOnLayer(layer):
+            n += 1
+    return n
+
+
 @dataclass
 class ExportOptions:
-    include_bcu: bool
+    sides: tuple  # subset of ("front", "back")
+    include_copper: bool
     include_silk: bool
     include_edge: bool
     include_drill: bool
     include_pads: bool
-    mirror: bool
+    mirror_front: bool
+    mirror_back: bool
     rasterize_png: bool
     dpi: int
     outdir: str
@@ -67,59 +98,13 @@ class LaserExporter:
             raise RuntimeError("No closed Edge.Cuts outline found.")
 
         bbox = self._poly_bbox_iu(board_outline)
-        written = []
-
-        ablate = pcbnew.SHAPE_POLY_SET()
-        if self.opts.include_bcu:
-            copper = self._copper_poly(pcbnew.B_Cu)
-            negative = pcbnew.SHAPE_POLY_SET(board_outline)
-            _bool_sub(negative, copper)
-            _bool_add(ablate, negative)
-
-        if self.opts.include_silk:
-            silk = self._silk_poly(pcbnew.B_SilkS)
-            _bool_inter(silk, board_outline)
-            _bool_add(ablate, silk)
-
-        _simplify(ablate)
-
         base = os.path.splitext(os.path.basename(self.board.GetFileName()))[0] or "board"
 
         svg_paths = []
+        for side in self.opts.sides:
+            svg_paths.extend(self._export_side(side, base, board_outline, bbox))
 
-        if self.opts.include_bcu or self.opts.include_silk:
-            ablate_path = os.path.join(self.opts.outdir, f"{base}_ablate.svg")
-            self._write_svg(ablate_path, [(ablate, "black")], bbox)
-            svg_paths.append(ablate_path)
-
-        if self.opts.include_edge:
-            cut_path = os.path.join(self.opts.outdir, f"{base}_cut.svg")
-            self._write_svg(
-                cut_path,
-                [(board_outline, "none")],
-                bbox,
-                stroke="red",
-                stroke_width_mm=0.1,
-            )
-            svg_paths.append(cut_path)
-
-        if self.opts.include_drill:
-            holes = self._collect_drills()
-            if holes:
-                drill_path = os.path.join(self.opts.outdir, f"{base}_drill.svg")
-                self._write_drill_svg(drill_path, holes, bbox)
-                svg_paths.append(drill_path)
-
-        if self.opts.include_pads:
-            pads = self._pads_poly(pcbnew.B_Cu)
-            _bool_inter(pads, board_outline)
-            _simplify(pads)
-            if pads.OutlineCount():
-                pads_path = os.path.join(self.opts.outdir, f"{base}_pads.svg")
-                self._write_svg(pads_path, [(pads, "black")], bbox)
-                svg_paths.append(pads_path)
-
-        written.extend(svg_paths)
+        written = list(svg_paths)
 
         if self.opts.rasterize_png and svg_paths:
             tool = _detect_rasterizer()
@@ -135,12 +120,73 @@ class LaserExporter:
 
         return written
 
+    def _export_side(self, side, base, board_outline, bbox):
+        """Write every requested file for one side. Cut and drill are written per
+        side too, so each side's job set registers under its own mirror setting."""
+        cu_layer, silk_layer, mask_layer = (getattr(pcbnew, n) for n in SIDE_LAYERS[side])
+        mirror = self.opts.mirror_front if side == "front" else self.opts.mirror_back
+
+        def out(kind):
+            return os.path.join(self.opts.outdir, f"{base}_{side}_{kind}.svg")
+
+        svg_paths = []
+
+        if self.opts.include_copper:
+            copper = self._copper_poly(cu_layer)
+            negative = pcbnew.SHAPE_POLY_SET(board_outline)
+            _bool_sub(negative, copper)
+            _simplify(negative)
+            path = out("copper")
+            self._write_svg(path, [(negative, "black")], bbox, mirror)
+            svg_paths.append(path)
+
+        if self.opts.include_silk:
+            silk = self._silk_poly(silk_layer)
+            _bool_inter(silk, board_outline)
+            _simplify(silk)
+            if silk.OutlineCount():
+                path = out("silk")
+                self._write_svg(path, [(silk, "black")], bbox, mirror)
+                svg_paths.append(path)
+
+        if self.opts.include_edge:
+            path = out("cut")
+            self._write_svg(
+                path,
+                [(board_outline, "none")],
+                bbox,
+                mirror,
+                stroke="red",
+                stroke_width_mm=0.1,
+            )
+            svg_paths.append(path)
+
+        if self.opts.include_drill:
+            holes = self._collect_drills()
+            if holes:
+                path = out("drill")
+                self._write_drill_svg(path, holes, bbox, mirror)
+                svg_paths.append(path)
+
+        if self.opts.include_pads:
+            pads = self._pads_poly(cu_layer, mask_layer)
+            _bool_inter(pads, board_outline)
+            _simplify(pads)
+            if pads.OutlineCount():
+                path = out("pads")
+                self._write_svg(path, [(pads, "black")], bbox, mirror)
+                svg_paths.append(path)
+
+        return svg_paths
+
     # ---------- geometry collection ----------
 
     def _board_outline_poly(self):
         outline = pcbnew.SHAPE_POLY_SET()
         try:
-            self.board.GetBoardPolygonOutlines(outline, True)
+            # KiCad 10+: 2nd arg is aInferOutlineIfNecessary. Must be False, or a
+            # broken Edge.Cuts silently becomes an invented outline.
+            self.board.GetBoardPolygonOutlines(outline, False)
         except TypeError:
             self.board.GetBoardPolygonOutlines(outline)
         return outline
@@ -153,10 +199,19 @@ class LaserExporter:
                 continue
             self._add_item_shape(track, layer, poly)
 
+        # Graphic shapes/text drawn directly on the copper layer (e.g. a filled
+        # rectangle used as a hand-made pad) are copper too.
+        for d in self.board.GetDrawings():
+            if d.IsOnLayer(layer):
+                self._add_item_shape(d, layer, poly)
+
         for fp in self.board.GetFootprints():
             for pad in fp.Pads():
                 if pad.IsOnLayer(layer):
                     self._add_item_shape(pad, layer, poly)
+            for item in fp.GraphicalItems():
+                if item.IsOnLayer(layer):
+                    self._add_item_shape(item, layer, poly)
 
         for i in range(self.board.GetAreaCount()):
             zone = self.board.GetArea(i)
@@ -194,15 +249,29 @@ class LaserExporter:
         _simplify(poly)
         return poly
 
-    def _pads_poly(self, layer):
+    def _pads_poly(self, layer, mask_layer):
         """Pad copper on `layer`, for burning the paint back off the pads once
-        traces, holes and outline are done — so they can be soldered."""
+        traces, holes and outline are done — so they can be soldered.
+        Filled shapes drawn on the copper layer count as hand-made pads; unfilled
+        lines/outlines and text do not. Anything drawn on `mask_layer` is a
+        solder-mask opening, so it is included as-is."""
         poly = pcbnew.SHAPE_POLY_SET()
 
         for fp in self.board.GetFootprints():
             for pad in fp.Pads():
                 if pad.IsOnLayer(layer):
                     self._add_item_shape(pad, layer, poly)
+            for item in fp.GraphicalItems():
+                if item.IsOnLayer(layer) and _is_filled_shape(item):
+                    self._add_item_shape(item, layer, poly)
+                elif item.IsOnLayer(mask_layer):
+                    self._add_item_shape(item, mask_layer, poly)
+
+        for d in self.board.GetDrawings():
+            if d.IsOnLayer(layer) and _is_filled_shape(d):
+                self._add_item_shape(d, layer, poly)
+            elif d.IsOnLayer(mask_layer):
+                self._add_item_shape(d, mask_layer, poly)
 
         _simplify(poly)
         return poly
@@ -236,11 +305,10 @@ class LaserExporter:
 
         return holes
 
-    def _write_drill_svg(self, path, holes, bbox_iu):
+    def _write_drill_svg(self, path, holes, bbox_iu, mirror):
         x0, y0, x1, y1 = bbox_iu
         w_mm = (x1 - x0) / IU_PER_MM
         h_mm = (y1 - y0) / IU_PER_MM
-        mirror = self.opts.mirror
 
         body = []
         for cx, cy, dx, dy in holes:
@@ -296,14 +364,14 @@ class LaserExporter:
         return (bbox.GetLeft(), bbox.GetTop(),
                 bbox.GetRight(), bbox.GetBottom())
 
-    def _write_svg(self, path, layers, bbox_iu, stroke="none", stroke_width_mm=0.0):
+    def _write_svg(self, path, layers, bbox_iu, mirror, stroke="none", stroke_width_mm=0.0):
         x0, y0, x1, y1 = bbox_iu
         w_mm = (x1 - x0) / IU_PER_MM
         h_mm = (y1 - y0) / IU_PER_MM
 
         body = []
         for poly, fill in layers:
-            d = self._poly_to_svg_path(poly, x0, y0, w_mm)
+            d = self._poly_to_svg_path(poly, x0, y0, w_mm, mirror)
             if not d:
                 continue
             attrs = [
@@ -329,9 +397,8 @@ class LaserExporter:
         with open(path, "w", encoding="utf-8") as f:
             f.write(svg)
 
-    def _poly_to_svg_path(self, poly_set, x0_iu, y0_iu, w_mm):
+    def _poly_to_svg_path(self, poly_set, x0_iu, y0_iu, w_mm, mirror):
         parts = []
-        mirror = self.opts.mirror
 
         def chain_to_d(chain):
             n = chain.PointCount()

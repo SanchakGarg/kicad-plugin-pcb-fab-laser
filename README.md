@@ -10,14 +10,22 @@ masks the copper for etching.
 Every file shares one bounding box, taken from the board outline, so they overlay 1:1
 in the laser software. Coordinates are millimetres, 1:1 scale.
 
-| File | Content | Laser job |
-|---|---|---|
-| `<board>_ablate.svg` | `(board outline − B.Cu) ∪ (B.SilkS ∩ outline)` | burn paint off everything that is *not* a trace, so the traces stay masked for etching |
-| `<board>_cut.svg` | Edge.Cuts outline, unfilled, red 0.1 mm stroke | cut the board out |
-| `<board>_drill.svg` | one dot per via and pad drill | drill targets |
-| `<board>_pads.svg` | B.Cu pad shapes, clipped to the outline | burn the remaining paint off the pads so they can be soldered |
+Files are written per side, as `<board>_<side>_<kind>.svg` with `<side>` = `front`
+or `back`:
 
-Suggested order: **ablate → etch → drill → cut → pads**. The pads pass runs last,
+| Kind | Content | Laser job |
+|---|---|---|
+| `copper` | board outline − Cu (including shapes drawn on the copper layer) | burn paint off everything that is *not* a trace, so the traces stay masked for etching |
+| `silk` | SilkS, clipped to the outline | silkscreen artwork, as its own job |
+| `cut` | Edge.Cuts outline, unfilled, red 0.1 mm stroke | cut the board out |
+| `drill` | one dot per via and pad drill | drill targets |
+| `pads` | Cu pads, filled shapes drawn on copper, and anything drawn on the solder mask layer (mask openings), clipped to the outline | burn the remaining paint off the pads so they can be soldered |
+
+Copper and silkscreen are separate files so each can get its own power/speed.
+`cut` and `drill` are written for each side, mirrored to match that side's files, so
+every side's job set registers on its own.
+
+Suggested order per side: **copper → etch → drill → cut → pads**. The pads pass runs last,
 on the finished board, and strips the leftover paint (the etch mask, acting as a
 solder mask) off just the pads.
 
@@ -31,8 +39,12 @@ and none is found. On macOS, `/opt/homebrew/bin` and `/usr/local/bin` are also
 probed directly, since a Dock-launched KiCad inherits a minimal `PATH` that omits
 Homebrew.
 
-**Mirror** is on by default, since the artwork is for the bottom copper layer seen
-through the board.
+**Sides to export** is Front (`F.Cu` / `F.SilkS`), Back (`B.Cu` / `B.SilkS`) or Both.
+It defaults to the side(s) with tracks, SMD pads or zones. Through-hole pads are
+ignored for this guess, since they sit on both layers.
+
+**Mirror** is set per side: back-side files are mirrored by default (the artwork is
+seen through the board), front-side files are not.
 
 ## Install
 

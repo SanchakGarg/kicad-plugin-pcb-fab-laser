@@ -2,7 +2,14 @@ import os
 import pcbnew
 import wx
 
-from .exporter import LaserExporter, ExportOptions
+from .exporter import LaserExporter, ExportOptions, copper_item_count
+
+SIDE_FRONT, SIDE_BACK, SIDE_BOTH = range(3)
+SIDES_BY_CHOICE = {
+    SIDE_FRONT: ("front",),
+    SIDE_BACK: ("back",),
+    SIDE_BOTH: ("front", "back"),
+}
 
 
 class PcbFabLaserPlugin(pcbnew.ActionPlugin):
@@ -10,7 +17,7 @@ class PcbFabLaserPlugin(pcbnew.ActionPlugin):
         self.name = "PCB Fab Laser SVG Export"
         self.category = "Fabrication"
         self.description = (
-            "Export SVG layers (B.Cu negative, B.SilkS, Edge.Cuts) "
+            "Export SVG layers (copper negative, silkscreen, Edge.Cuts) "
             "for xTool laser PCB fabrication."
         )
         self.show_toolbar_button = True
@@ -31,25 +38,34 @@ class PcbFabLaserPlugin(pcbnew.ActionPlugin):
 
 class ExportDialog(wx.Dialog):
     def __init__(self, parent, board):
-        super().__init__(parent, title="PCB Fab Laser SVG Export", size=(500, 500))
+        super().__init__(parent, title="PCB Fab Laser SVG Export", size=(520, 600))
         self.board = board
 
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        sizer.Add(wx.StaticText(panel, label="Layers to include in ablate.svg:"),
+        self.rb_side = wx.RadioBox(
+            panel, label="Sides to export",
+            choices=["Front (F.Cu / F.SilkS)", "Back (B.Cu / B.SilkS)", "Both"])
+        # Default to whichever side(s) actually carry the routing.
+        n_front = copper_item_count(board, pcbnew.F_Cu)
+        n_back = copper_item_count(board, pcbnew.B_Cu)
+        if n_front and n_back:
+            self.rb_side.SetSelection(SIDE_BOTH)
+        else:
+            self.rb_side.SetSelection(SIDE_FRONT if n_front > n_back else SIDE_BACK)
+        sizer.Add(self.rb_side, flag=wx.EXPAND | wx.ALL, border=8)
+
+        sizer.Add(wx.StaticText(panel, label="Files per side:"),
                   flag=wx.ALL, border=8)
-        self.cb_bcu = wx.CheckBox(panel, label="B.Cu (copper, negative — keep traces)")
-        self.cb_silk = wx.CheckBox(panel, label="B.SilkS (silkscreen, positive)")
-        self.cb_bcu.SetValue(True)
+        self.cb_copper = wx.CheckBox(
+            panel, label="Copper (negative — keep traces → copper.svg)")
+        self.cb_silk = wx.CheckBox(panel, label="Silkscreen (positive → silk.svg)")
+        self.cb_copper.SetValue(True)
         self.cb_silk.SetValue(True)
-        sizer.Add(self.cb_bcu, flag=wx.LEFT | wx.RIGHT, border=16)
-        sizer.Add(self.cb_silk, flag=wx.LEFT | wx.RIGHT | wx.BOTTOM, border=16)
+        sizer.Add(self.cb_copper, flag=wx.LEFT | wx.RIGHT, border=16)
+        sizer.Add(self.cb_silk, flag=wx.LEFT | wx.RIGHT, border=16)
 
-        sizer.Add(wx.StaticLine(panel), flag=wx.EXPAND | wx.ALL, border=4)
-
-        sizer.Add(wx.StaticText(panel, label="Separate files:"),
-                  flag=wx.ALL, border=8)
         self.cb_edge = wx.CheckBox(panel, label="Edge.Cuts (board outline → cut.svg)")
         self.cb_edge.SetValue(True)
         sizer.Add(self.cb_edge, flag=wx.LEFT | wx.RIGHT, border=16)
@@ -63,9 +79,13 @@ class ExportDialog(wx.Dialog):
 
         sizer.Add(wx.StaticLine(panel), flag=wx.EXPAND | wx.ALL, border=4)
 
-        self.cb_mirror = wx.CheckBox(panel, label="Mirror (bottom-side laser)")
-        self.cb_mirror.SetValue(True)
-        sizer.Add(self.cb_mirror, flag=wx.ALL, border=8)
+        # Back-side artwork is seen through the board, so it is mirrored by default.
+        self.cb_mirror_front = wx.CheckBox(panel, label="Mirror front-side files")
+        self.cb_mirror_back = wx.CheckBox(panel, label="Mirror back-side files")
+        self.cb_mirror_front.SetValue(False)
+        self.cb_mirror_back.SetValue(True)
+        sizer.Add(self.cb_mirror_front, flag=wx.LEFT | wx.RIGHT | wx.TOP, border=8)
+        sizer.Add(self.cb_mirror_back, flag=wx.ALL, border=8)
 
         png_box = wx.BoxSizer(wx.HORIZONTAL)
         self.cb_png = wx.CheckBox(panel, label="Also rasterize PNG @ DPI:")
@@ -128,12 +148,14 @@ class ExportDialog(wx.Dialog):
             return
 
         opts = ExportOptions(
-            include_bcu=self.cb_bcu.GetValue(),
+            sides=SIDES_BY_CHOICE[self.rb_side.GetSelection()],
+            include_copper=self.cb_copper.GetValue(),
             include_silk=self.cb_silk.GetValue(),
             include_edge=self.cb_edge.GetValue(),
             include_drill=self.cb_drill.GetValue(),
             include_pads=self.cb_pads.GetValue(),
-            mirror=self.cb_mirror.GetValue(),
+            mirror_front=self.cb_mirror_front.GetValue(),
+            mirror_back=self.cb_mirror_back.GetValue(),
             rasterize_png=self.cb_png.GetValue(),
             dpi=dpi,
             outdir=outdir,

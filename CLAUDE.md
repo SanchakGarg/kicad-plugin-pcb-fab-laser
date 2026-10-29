@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A KiCad 9 pcbnew ActionPlugin that exports laser-fabrication SVGs (and optional PNGs) from a loaded board, targeting xTool-style diode lasers ablating spray-painted copper-clad boards.
+A KiCad 9/10 pcbnew ActionPlugin that exports laser-fabrication SVGs (and optional PNGs) from a loaded board, targeting xTool-style diode lasers ablating spray-painted copper-clad boards.
 
 ## Install / run
 
@@ -40,25 +40,28 @@ Three files, strict layering:
 
 Everything is flattened into `SHAPE_POLY_SET` (KiCad's polygon-set type) in internal units (IU, 1e6 per mm), then serialized to SVG by hand — no `pcbnew` plotter is used. Arcs are polygonized with a 5 µm chord error (`ARC_ERROR_IU`).
 
-Four output files, named from the board filename stem:
+`ExportOptions.sides` is a tuple of `"front"`/`"back"`; `run()` calls `_export_side()` once per side, which maps the side to its layer pair via `SIDE_LAYERS` (F.Cu/F.SilkS/F.Mask or B.Cu/B.SilkS/B.Mask) and its mirror flag (`mirror_front` / `mirror_back`). Up to five files per side, named `<base>_<side>_<kind>.svg`:
 
-| File | Content | Laser meaning |
+| Kind | Content | Laser meaning |
 |---|---|---|
-| `<base>_ablate.svg` | `(board_outline − B.Cu) ∪ (B.SilkS ∩ board_outline)` | black = burn/ablate paint, leaving traces masked |
-| `<base>_cut.svg` | Edge.Cuts outline, `fill=none`, red 0.1 mm stroke | cut path |
-| `<base>_drill.svg` | one `<circle>`/`<ellipse>` per via and pad drill | drill targets |
-| `<base>_pads.svg` | B.Cu pad shapes ∩ board_outline | last pass on the finished board: strip the leftover etch mask off pads so they solder |
+| `copper` | `board_outline − Cu` (tracks, pads, zones, and any shapes/text drawn on the Cu layer) | black = burn/ablate paint, leaving traces masked |
+| `silk` | `SilkS ∩ board_outline` | silkscreen artwork, separate job |
+| `cut` | Edge.Cuts outline, `fill=none`, red 0.1 mm stroke | cut path |
+| `drill` | one `<circle>`/`<ellipse>` per via and pad drill | drill targets |
+| `pads` | (Cu pads ∪ *filled* `PCB_SHAPE`s drawn on Cu ∪ anything drawn on that side's Mask layer, board or footprint) ∩ board_outline | last pass on the finished board: strip the leftover etch mask off pads so they solder |
 
-Key point: **B.Cu is negative** (subtracted from the board outline) while **B.SilkS is positive** (added). Preserve this asymmetry — the laser removes paint everywhere black. The pads file is positive and deliberately kept out of `ablate` — it is a *separate laser job run after etch/drill/cut*, not part of the mask artwork.
+`cut` and `drill` are side-independent geometry but are still written per side, so each side's set carries that side's mirror and registers on its own. The dialog defaults `sides` from `copper_item_count` (tracks + SMD pads + zones; PTH pads are excluded because they are on every copper layer) and defaults mirror on for back only.
 
-All four files share the **same bbox**, taken from the board outline, so they overlay 1:1 in the laser software. Coordinates are emitted in mm with a `viewBox` in mm and `width`/`height` in `mm` units. The `mirror` option flips X about the shared width (`x_mm = w_mm - x_mm`) and must be applied identically in `_poly_to_svg_path` and `_write_drill_svg`; if you add another writer, mirror there too or layers will not register.
+Key point: **copper is negative** (subtracted from the board outline) while **silkscreen and pads are positive**. Preserve this asymmetry — the laser removes paint everywhere black. Copper and silk are deliberately separate files (different power/speed); don't merge them back. The pads file is a *separate laser job run after etch/drill/cut*, not part of the mask artwork.
+
+All files share the **same bbox**, taken from the board outline, so they overlay 1:1 in the laser software. Coordinates are emitted in mm with a `viewBox` in mm and `width`/`height` in `mm` units. Mirroring flips X about the shared width (`x_mm = w_mm - x_mm`); the per-side `mirror` flag is passed explicitly into `_write_svg`/`_poly_to_svg_path` and `_write_drill_svg`. If you add another writer, take and apply `mirror` the same way or layers will not register.
 
 ### KiCad API compatibility shims
 
 `exporter.py` wraps several pcbnew calls because signatures differ across KiCad versions:
 
 - `_bool_add` / `_bool_sub` / `_bool_inter` / `_simplify` pass `PM_FAST` only when the enum exists.
-- `_board_outline_poly` retries `GetBoardPolygonOutlines` without the second arg on `TypeError`.
+- `_board_outline_poly` passes `False` as the second arg (KiCad 10's `aInferOutlineIfNecessary` — `True` would silently invent an outline for a broken Edge.Cuts), and retries without it on `TypeError` (KiCad 9 and earlier, where that slot is an error-handler pointer).
 - `_add_item_shape` retries `TransformShapeToPolygon` with a trailing `False` arg, then swallows failures.
 - `_collect_drills` falls back from `GetDrillValue()` to `GetDrill()`.
 
