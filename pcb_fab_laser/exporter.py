@@ -158,6 +158,9 @@ class LaserExporter:
                 mirror,
                 stroke="red",
                 stroke_width_mm=0.1,
+                # Laser software imports the background rect as a shape and
+                # would cut it; the outline alone already spans the bbox.
+                background=False,
             )
             svg_paths.append(path)
 
@@ -364,7 +367,8 @@ class LaserExporter:
         return (bbox.GetLeft(), bbox.GetTop(),
                 bbox.GetRight(), bbox.GetBottom())
 
-    def _write_svg(self, path, layers, bbox_iu, mirror, stroke="none", stroke_width_mm=0.0):
+    def _write_svg(self, path, layers, bbox_iu, mirror, stroke="none", stroke_width_mm=0.0,
+                   background=True):
         x0, y0, x1, y1 = bbox_iu
         w_mm = (x1 - x0) / IU_PER_MM
         h_mm = (y1 - y0) / IU_PER_MM
@@ -389,7 +393,8 @@ class LaserExporter:
             f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" '
             f'width="{w_mm}mm" height="{h_mm}mm" '
             f'viewBox="0 0 {w_mm} {h_mm}">\n'
-            f'  <rect x="0" y="0" width="{w_mm}" height="{h_mm}" fill="white"/>\n'
+            + (f'  <rect x="0" y="0" width="{w_mm}" height="{h_mm}" fill="white"/>\n'
+               if background else "")
             + "\n".join(body) + "\n"
             "</svg>\n"
         )
